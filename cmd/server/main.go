@@ -26,6 +26,17 @@ func main() {
 	}
 	defer ch.Close()
 
+	_, _, err = pubsub.DeclareAndBind(
+		conn,
+		routing.ExchangePerilTopic,
+		"game_logs",
+		"game_logs.*",
+		pubsub.Durable,
+	)
+	if err != nil {
+		log.Fatalf("failed to declare and bind game_logs queue: %v", err)
+	}
+
 	gamelogic.PrintServerHelp()
 
 	for {

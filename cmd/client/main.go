@@ -3,15 +3,19 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
+
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	return func(state routing.PlayingState) {
+		defer fmt.Print("> ")
+		gs.HandlePause(state)
+	}
+}
 
 func main() {
 	const rabbitConnString = "amqp://guest:guest@localhost:5672/"
@@ -43,9 +47,53 @@ func main() {
 	fmt.Println("Starting Peril client...")
 	fmt.Println("Listening on queue:", q.Name)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
+	gs := gamelogic.NewGameState(username)
 
-	fmt.Println("Shutting down...")
+	err = pubsub.SubscribeJSON(
+		conn,
+		exchange,
+		queueName,
+		routingKey,
+		pubsub.Transient,
+		handlerPause(gs),
+	)
+	if err != nil {
+		log.Fatalf("failed to subscribe to pause queue: %v", err)
+	}
+
+	for {
+		words := gamelogic.GetInput()
+
+		if len(words) == 0 {
+			continue
+		}
+
+		switch words[0] {
+		case "move":
+			_, err := gs.CommandMove(words)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+
+		case "spawn":
+			err = gs.CommandSpawn(words)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+
+		case "status":
+			gs.CommandStatus()
+		case "help":
+			gamelogic.PrintClientHelp()
+		case "spam":
+			fmt.Println("not allowed yet")
+		case "quit":
+			gamelogic.PrintQuit()
+			return
+		default:
+			fmt.Println("unknown command")
+		}
+	}
 }
