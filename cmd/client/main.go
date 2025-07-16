@@ -10,17 +10,63 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
-	return func(state routing.PlayingState) {
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
+	return func(state routing.PlayingState) pubsub.AckType {
 		defer fmt.Print("> ")
 		gs.HandlePause(state)
+		return pubsub.Ack
 	}
 }
 
-func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) {
-	return func(move gamelogic.ArmyMove) {
+func handlerMove(gs *gamelogic.GameState, publishCh *amqp.Channel) func(gamelogic.ArmyMove) pubsub.AckType {
+	return func(move gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
-		gs.HandleMove(move)
+		outcome := gs.HandleMove(move)
+		
+		switch outcome {
+		case gamelogic.MoveOutComeSafe:
+			return pubsub.Ack
+		case gamelogic.MoveOutcomeMakeWar:
+			// Publish war message
+			warMessage := gamelogic.RecognitionOfWar{
+				Attacker: move.Player,
+				Defender: gs.GetPlayerSnap(),
+			}
+			warRoutingKey := routing.WarRecognitionsPrefix + "." + gs.GetUsername()
+			err := pubsub.PublishJSON(publishCh, routing.ExchangePerilTopic, warRoutingKey, warMessage)
+			if err != nil {
+				fmt.Printf("failed to publish war message: %v\n", err)
+				return pubsub.NackRequeue
+			}
+			return pubsub.Ack
+		case gamelogic.MoveOutcomeSamePlayer:
+			return pubsub.NackDiscard
+		default:
+			return pubsub.NackDiscard
+		}
+	}
+}
+
+func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+	return func(rw gamelogic.RecognitionOfWar) pubsub.AckType {
+		defer fmt.Print("> ")
+		outcome, _, _ := gs.HandleWar(rw)
+		
+		switch outcome {
+		case gamelogic.WarOutcomeNotInvolved:
+			return pubsub.NackRequeue
+		case gamelogic.WarOutcomeNoUnits:
+			return pubsub.NackDiscard
+		case gamelogic.WarOutcomeOpponentWon:
+			return pubsub.Ack
+		case gamelogic.WarOutcomeYouWon:
+			return pubsub.Ack
+		case gamelogic.WarOutcomeDraw:
+			return pubsub.Ack
+		default:
+			fmt.Printf("Error: unknown war outcome: %v\n", outcome)
+			return pubsub.NackDiscard
+		}
 	}
 }
 
@@ -103,10 +149,30 @@ func main() {
 		armyMovesQueueName,
 		armyMovesRoutingKey,
 		pubsub.Transient,
-		handlerMove(gs),
+		handlerMove(gs, publishCh),
 	)
 	if err != nil {
 		log.Fatalf("failed to subscribe to army moves queue: %v", err)
+	}
+
+	// Subscribe to war messages
+	warQueueName := "war"
+	warRoutingKey := routing.WarRecognitionsPrefix + ".*"
+	warExchange := routing.ExchangePerilTopic
+
+	fmt.Printf("Subscribing to war messages with queue: %s, routing key: %s, exchange: %s\n", 
+		warQueueName, warRoutingKey, warExchange)
+
+	err = pubsub.SubscribeJSON(
+		conn,
+		warExchange,
+		warQueueName,
+		warRoutingKey,
+		pubsub.Durable,
+		handlerWar(gs),
+	)
+	if err != nil {
+		log.Fatalf("failed to subscribe to war queue: %v", err)
 	}
 
 	for {

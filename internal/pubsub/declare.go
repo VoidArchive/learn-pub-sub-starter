@@ -1,6 +1,9 @@
 package pubsub
 
-import amqp "github.com/rabbitmq/amqp091-go"
+import (
+	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
+	amqp "github.com/rabbitmq/amqp091-go"
+)
 
 type SimpleQueueType int
 
@@ -40,9 +43,28 @@ func DeclareAndBind(
 		return nil, amqp.Queue{}, err
 	}
 
+	// Declare the dead letter exchange
+	err = ch.ExchangeDeclare(
+		routing.ExchangePerilDLX,
+		"fanout",
+		true,  // durable
+		false, // auto-delete
+		false, // internal
+		false, // no-wait
+		nil,   // arguments
+	)
+	if err != nil {
+		return nil, amqp.Queue{}, err
+	}
+
 	durable := queueType == Durable
 	autoDelete := queueType == Transient
 	exclusive := queueType == Transient
+
+	// Set up dead letter exchange arguments
+	args := amqp.Table{
+		"x-dead-letter-exchange": routing.ExchangePerilDLX,
+	}
 
 	q, err := ch.QueueDeclare(
 		queueName,
@@ -50,7 +72,7 @@ func DeclareAndBind(
 		autoDelete,
 		exclusive,
 		false,
-		nil,
+		args,
 	)
 	if err != nil {
 		return nil, amqp.Queue{}, err
