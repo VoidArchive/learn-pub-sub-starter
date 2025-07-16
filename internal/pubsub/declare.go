@@ -21,6 +21,25 @@ func DeclareAndBind(
 		return nil, amqp.Queue{}, err
 	}
 
+	// Declare the exchange first
+	exchangeType := "direct"
+	if exchange == "peril_topic" {
+		exchangeType = "topic"
+	}
+	
+	err = ch.ExchangeDeclare(
+		exchange,
+		exchangeType,
+		true,  // durable
+		false, // auto-delete
+		false, // internal
+		false, // no-wait
+		nil,   // arguments
+	)
+	if err != nil {
+		return nil, amqp.Queue{}, err
+	}
+
 	durable := queueType == Durable
 	autoDelete := queueType == Transient
 	exclusive := queueType == Transient

@@ -17,6 +17,13 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
 	}
 }
 
+func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) {
+	return func(move gamelogic.ArmyMove) {
+		defer fmt.Print("> ")
+		gs.HandleMove(move)
+	}
+}
+
 func main() {
 	const rabbitConnString = "amqp://guest:guest@localhost:5672/"
 	conn, err := amqp.Dial(rabbitConnString)
@@ -44,6 +51,27 @@ func main() {
 
 	defer ch.Close()
 
+	// Create a publishing channel for army moves
+	publishCh, err := conn.Channel()
+	if err != nil {
+		log.Fatalf("could not create publishing channel: %v", err)
+	}
+	defer publishCh.Close()
+
+	// Declare the topic exchange for army moves
+	err = publishCh.ExchangeDeclare(
+		routing.ExchangePerilTopic,
+		"topic",
+		true,  // durable
+		false, // auto-delete
+		false, // internal
+		false, // no-wait
+		nil,   // arguments
+	)
+	if err != nil {
+		log.Fatalf("could not declare topic exchange: %v", err)
+	}
+
 	fmt.Println("Starting Peril client...")
 	fmt.Println("Listening on queue:", q.Name)
 
@@ -61,6 +89,26 @@ func main() {
 		log.Fatalf("failed to subscribe to pause queue: %v", err)
 	}
 
+	// Subscribe to army moves
+	armyMovesQueueName := routing.ArmyMovesPrefix + "." + username
+	armyMovesRoutingKey := routing.ArmyMovesPrefix + ".*"
+	armyMovesExchange := routing.ExchangePerilTopic
+
+	fmt.Printf("Subscribing to army moves with queue: %s, routing key: %s, exchange: %s\n", 
+		armyMovesQueueName, armyMovesRoutingKey, armyMovesExchange)
+
+	err = pubsub.SubscribeJSON(
+		conn,
+		armyMovesExchange,
+		armyMovesQueueName,
+		armyMovesRoutingKey,
+		pubsub.Transient,
+		handlerMove(gs),
+	)
+	if err != nil {
+		log.Fatalf("failed to subscribe to army moves queue: %v", err)
+	}
+
 	for {
 		words := gamelogic.GetInput()
 
@@ -70,11 +118,21 @@ func main() {
 
 		switch words[0] {
 		case "move":
-			_, err := gs.CommandMove(words)
+			move, err := gs.CommandMove(words)
 			if err != nil {
 				fmt.Println(err)
 				continue
 			}
+
+			// Publish the move to army_moves.username routing key
+			moveRoutingKey := routing.ArmyMovesPrefix + "." + username
+			fmt.Printf("Publishing move to routing key: %s on exchange: %s\n", moveRoutingKey, routing.ExchangePerilTopic)
+			err = pubsub.PublishJSON(publishCh, routing.ExchangePerilTopic, moveRoutingKey, move)
+			if err != nil {
+				fmt.Printf("failed to publish move: %v\n", err)
+				continue
+			}
+			fmt.Println("Move published successfully")
 
 		case "spawn":
 			err = gs.CommandSpawn(words)
