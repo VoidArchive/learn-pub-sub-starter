@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
@@ -47,10 +48,25 @@ func handlerMove(gs *gamelogic.GameState, publishCh *amqp.Channel) func(gamelogi
 	}
 }
 
-func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+func publishGameLog(publishCh *amqp.Channel, username, message string) error {
+	gameLog := routing.GameLog{
+		CurrentTime: time.Now(),
+		Message:     message,
+		Username:    username,
+	}
+	
+	logRoutingKey := routing.GameLogSlug + "." + username
+	return pubsub.PublishGob(publishCh, routing.ExchangePerilTopic, logRoutingKey, gameLog)
+}
+
+func handlerWar(gs *gamelogic.GameState, publishCh *amqp.Channel) func(gamelogic.RecognitionOfWar) pubsub.AckType {
 	return func(rw gamelogic.RecognitionOfWar) pubsub.AckType {
 		defer fmt.Print("> ")
-		outcome, _, _ := gs.HandleWar(rw)
+		outcome, winner, loser := gs.HandleWar(rw)
+		
+		// Create log message based on outcome
+		var logMessage string
+		var initiator string
 		
 		switch outcome {
 		case gamelogic.WarOutcomeNotInvolved:
@@ -58,15 +74,27 @@ func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub
 		case gamelogic.WarOutcomeNoUnits:
 			return pubsub.NackDiscard
 		case gamelogic.WarOutcomeOpponentWon:
-			return pubsub.Ack
+			logMessage = fmt.Sprintf("%s won a war against %s", winner, loser)
+			initiator = rw.Attacker.Username
 		case gamelogic.WarOutcomeYouWon:
-			return pubsub.Ack
+			logMessage = fmt.Sprintf("%s won a war against %s", winner, loser)
+			initiator = rw.Attacker.Username
 		case gamelogic.WarOutcomeDraw:
-			return pubsub.Ack
+			logMessage = fmt.Sprintf("A war between %s and %s resulted in a draw", winner, loser)
+			initiator = rw.Attacker.Username
 		default:
 			fmt.Printf("Error: unknown war outcome: %v\n", outcome)
 			return pubsub.NackDiscard
 		}
+		
+		// Publish game log
+		err := publishGameLog(publishCh, initiator, logMessage)
+		if err != nil {
+			fmt.Printf("failed to publish game log: %v\n", err)
+			return pubsub.NackRequeue
+		}
+		
+		return pubsub.Ack
 	}
 }
 
@@ -169,7 +197,7 @@ func main() {
 		warQueueName,
 		warRoutingKey,
 		pubsub.Durable,
-		handlerWar(gs),
+		handlerWar(gs, publishCh),
 	)
 	if err != nil {
 		log.Fatalf("failed to subscribe to war queue: %v", err)
